@@ -1,0 +1,231 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function ownProfilePath() {
+      return /databases/$(database)/documents/users/$(request.auth.uid);
+    }
+
+    function hasProfile() {
+      return signedIn() && exists(ownProfilePath());
+    }
+
+    function profile() {
+      return get(ownProfilePath()).data;
+    }
+
+    function validRole(role) {
+      return role in [
+        'Administrador Master',
+        'Administrador',
+        'Gestor',
+        'RH',
+        'Diretoria',
+        'Observador'
+      ];
+    }
+
+    function activeUser() {
+      return hasProfile()
+        && profile().email == request.auth.token.email
+        && validRole(profile().role)
+        && (
+          // Compatibilidade temporária com o documento master legado, que já
+          // existia sem os campos uid/status. O caminho do documento continua
+          // sendo obrigatoriamente o UID autenticado.
+          profile().role == 'Administrador Master'
+          || (
+            profile().status == 'Ativo'
+            && profile().uid == request.auth.uid
+          )
+        );
+    }
+
+    function hasRole(roles) {
+      return activeUser() && profile().role in roles;
+    }
+
+    function isAdmin() {
+      return hasRole(['Administrador Master', 'Administrador']);
+    }
+
+    function canWorkWithRecruitment() {
+      return hasRole([
+        'Administrador Master',
+        'Administrador',
+        'Gestor',
+        'RH',
+        'Diretoria'
+      ]);
+    }
+
+    function isShortText(value, maxSize) {
+      return value is string && value.size() <= maxSize;
+    }
+
+    match /users/{userId} {
+      // Todo usuário autenticado pode ler somente o próprio perfil para que o
+      // aplicativo confirme status e função. A listagem é exclusiva de admins.
+      allow get: if signedIn() && (userId == request.auth.uid || isAdmin());
+      allow list: if isAdmin();
+
+      // Novas contas devem nascer no Firebase Authentication e ter o perfil
+      // criado por um administrador no console/Admin SDK, nunca pelo navegador.
+      allow create: if false;
+
+      allow update: if isAdmin()
+        && userId != request.auth.uid
+        && resource.data.role != 'Administrador Master'
+        && request.resource.data.role != 'Administrador Master'
+        && request.resource.data.uid == resource.data.uid
+        && request.resource.data.email == resource.data.email
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['nome', 'role', 'status'])
+        && validRole(request.resource.data.role)
+        && request.resource.data.status in ['Ativo', 'Inativo'];
+
+      allow delete: if isAdmin()
+        && userId != request.auth.uid
+        && resource.data.role != 'Administrador Master';
+    }
+
+    match /vagas/{vagaId} {
+      allow read: if activeUser();
+
+      allow create: if hasRole([
+          'Administrador Master', 'Administrador', 'Gestor', 'RH'
+        ])
+        && request.resource.data.keys().hasAll([
+          'titulo', 'area', 'salarioMin', 'salarioMax', 'modelo',
+          'senioridade', 'obrigatorios', 'desejaveis', 'status',
+          'createdAt', 'gestor'
+        ])
+        && request.resource.data.keys().hasOnly([
+          'titulo', 'area', 'salarioMin', 'salarioMax', 'modelo',
+          'senioridade', 'obrigatorios', 'desejaveis', 'status',
+          'createdAt', 'gestor'
+        ])
+        && isShortText(request.resource.data.titulo, 200)
+        && isShortText(request.resource.data.area, 200)
+        && isShortText(request.resource.data.salarioMin, 50)
+        && isShortText(request.resource.data.salarioMax, 50)
+        && isShortText(request.resource.data.modelo, 100)
+        && isShortText(request.resource.data.senioridade, 100)
+        && isShortText(request.resource.data.obrigatorios, 10000)
+        && isShortText(request.resource.data.desejaveis, 10000)
+        && request.resource.data.status in ['Em Andamento', 'Em Pausa', 'Concluída']
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.gestor == request.auth.token.email;
+
+      allow update: if hasRole([
+          'Administrador Master', 'Administrador', 'Gestor', 'RH'
+        ])
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.gestor == resource.data.gestor
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'titulo', 'area', 'salarioMin', 'salarioMax', 'modelo',
+          'senioridade', 'obrigatorios', 'desejaveis', 'status'
+        ])
+        && request.resource.data.status in ['Em Andamento', 'Em Pausa', 'Concluída'];
+
+      allow delete: if hasRole([
+        'Administrador Master', 'Administrador', 'Gestor', 'RH'
+      ]);
+    }
+
+    match /candidatos/{candidatoId} {
+      allow read: if canWorkWithRecruitment();
+
+      allow create: if hasRole([
+          'Administrador Master', 'Administrador', 'Gestor', 'RH'
+        ])
+        && request.resource.data.keys().hasAll([
+          'fase', 'nome', 'email', 'vagaId', 'demografia',
+          'experienciaAnos', 'formacao', 'certificacoes', 'resumoIA',
+          'createdAt', 'createdBy', 'rhSalario', 'rhPretensao', 'rhFit',
+          'rhBeneficios', 'tecFortes', 'tecFracos', 'tecPratica',
+          'dirVeredito', 'justificativaReprovacao'
+        ])
+        && request.resource.data.keys().hasOnly([
+          'fase', 'nome', 'email', 'vagaId', 'demografia',
+          'experienciaAnos', 'formacao', 'certificacoes', 'resumoIA',
+          'createdAt', 'createdBy', 'rhSalario', 'rhPretensao', 'rhFit',
+          'rhBeneficios', 'tecFortes', 'tecFracos', 'tecPratica',
+          'dirVeredito', 'justificativaReprovacao'
+        ])
+        && request.resource.data.fase == 'Triagem'
+        && isShortText(request.resource.data.nome, 300)
+        && isShortText(request.resource.data.email, 320)
+        && isShortText(request.resource.data.vagaId, 200)
+        && request.resource.data.experienciaAnos is int
+        && request.resource.data.experienciaAnos >= 0
+        && request.resource.data.experienciaAnos <= 80
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.createdBy == request.auth.token.email;
+
+      allow update: if canWorkWithRecruitment()
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.createdBy == resource.data.createdBy
+        && request.resource.data.fase in [
+          'Triagem', 'Entrevista RH', 'Entrevista Técnica',
+          'Entrevista Diretoria', 'Aprovado', 'Reprovado'
+        ]
+        && (
+          (isAdmin() && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'fase', 'nome', 'email', 'vagaId', 'demografia',
+            'experienciaAnos', 'formacao', 'certificacoes', 'resumoIA',
+            'rhSalario', 'rhPretensao', 'rhFit', 'rhBeneficios',
+            'tecFortes', 'tecFracos', 'tecPratica', 'dirVeredito',
+            'justificativaReprovacao'
+          ]))
+          || (hasRole(['RH']) && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'fase', 'rhSalario', 'rhPretensao', 'rhFit', 'rhBeneficios',
+            'justificativaReprovacao'
+          ]))
+          || (hasRole(['Gestor']) && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'fase', 'tecFortes', 'tecFracos', 'tecPratica',
+            'justificativaReprovacao'
+          ]))
+          || (hasRole(['Diretoria']) && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'fase', 'dirVeredito', 'justificativaReprovacao'
+          ]))
+        );
+
+      allow delete: if isAdmin();
+    }
+
+    match /audit_logs/{logId} {
+      allow read: if isAdmin();
+
+      allow create: if activeUser()
+        && request.resource.data.keys().hasAll([
+          'action', 'details', 'targetUser', 'previousValue', 'newValue',
+          'performedBy', 'userRole', 'timestamp'
+        ])
+        && request.resource.data.keys().hasOnly([
+          'action', 'details', 'targetUser', 'previousValue', 'newValue',
+          'performedBy', 'userRole', 'timestamp'
+        ])
+        && isShortText(request.resource.data.action, 100)
+        && isShortText(request.resource.data.details, 5000)
+        && isShortText(request.resource.data.targetUser, 320)
+        && isShortText(request.resource.data.previousValue, 5000)
+        && isShortText(request.resource.data.newValue, 5000)
+        && request.resource.data.performedBy == request.auth.token.email
+        && request.resource.data.userRole == profile().role
+        && request.resource.data.timestamp == request.time;
+
+      allow update, delete: if false;
+    }
+
+    // Negação por padrão para qualquer coleção atual ou futura não declarada.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

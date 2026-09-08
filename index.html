@@ -40,8 +40,8 @@
 
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
-        import { getAuth, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-auth.js";
-        import { getFirestore, collection, addDoc, getDocs, doc, getDoc, setDoc, updateDoc, deleteDoc, query, orderBy, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
+        import { getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-auth.js";
+        import { getFirestore, collection, addDoc, getDocs, doc, getDoc, updateDoc, deleteDoc, query, orderBy, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
 
         const firebaseConfig = {
           apiKey: "AIzaSyAMX0bLeWmLhdi0mmPraBBaTrZllP85R9Y",
@@ -61,8 +61,8 @@
         } catch (e) { console.warn("Firebase config error", e); }
 
         window.firebaseServices = { 
-            auth, db, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, onAuthStateChanged,
-            collection, addDoc, getDocs, doc, getDoc, setDoc, updateDoc, deleteDoc, query, orderBy, serverTimestamp
+            auth, db, signInWithEmailAndPassword, signOut, onAuthStateChanged,
+            collection, addDoc, getDocs, doc, getDoc, updateDoc, deleteDoc, query, orderBy, serverTimestamp
         };
     </script>
 
@@ -416,8 +416,8 @@
         const PERMISSIONS = {
             'Administrador Master': ['dashboard', 'vagas', 'candidatos', 'auditoria', 'usuarios', 'config-ia'],
             'Administrador': ['dashboard', 'vagas', 'candidatos', 'auditoria', 'usuarios', 'config-ia'],
-            'Gestor': ['dashboard', 'vagas', 'candidatos', 'usuarios'],
-            'RH': ['dashboard', 'vagas', 'candidatos', 'config-ia', 'usuarios'],
+            'Gestor': ['dashboard', 'vagas', 'candidatos'],
+            'RH': ['dashboard', 'vagas', 'candidatos', 'config-ia'],
             'Diretoria': ['dashboard', 'vagas', 'candidatos'],
             'Observador': ['dashboard']
         };
@@ -469,54 +469,70 @@
         async function fetchAllData() {
             const { db, collection, getDocs, query, orderBy } = window.firebaseServices;
             try {
+                const canReadCandidates = ['Administrador Master', 'Administrador', 'Gestor', 'RH', 'Diretoria'].includes(currentUserRole);
+                const canReadAdministrativeData = ['Administrador Master', 'Administrador'].includes(currentUserRole);
                 const [vSnap, cSnap, uSnap, lSnap] = await Promise.all([
                     getDocs(query(collection(db, "vagas"), orderBy("createdAt", "desc"))),
-                    getDocs(query(collection(db, "candidatos"), orderBy("createdAt", "desc"))),
-                    getDocs(query(collection(db, "users"), orderBy("createdAt", "desc"))),
-                    getDocs(query(collection(db, "audit_logs"), orderBy("timestamp", "desc")))
+                    canReadCandidates ? getDocs(query(collection(db, "candidatos"), orderBy("createdAt", "desc"))) : Promise.resolve(null),
+                    canReadAdministrativeData ? getDocs(query(collection(db, "users"), orderBy("createdAt", "desc"))) : Promise.resolve(null),
+                    canReadAdministrativeData ? getDocs(query(collection(db, "audit_logs"), orderBy("timestamp", "desc"))) : Promise.resolve(null)
                 ]);
                 dbData.vagas = vSnap.docs.map(d => ({ id: d.id, ...d.data() }));
-                dbData.candidatos = cSnap.docs.map(d => ({ id: d.id, ...d.data() }));
-                dbData.users = uSnap.docs.map(d => ({ id: d.id, ...d.data() }));
-                dbData.logs = lSnap.docs.map(d => ({ id: d.id, ...d.data() }));
-            } catch (e) { console.warn("Fetch collections failed", e); }
+                dbData.candidatos = cSnap ? cSnap.docs.map(d => ({ id: d.id, ...d.data() })) : [];
+                dbData.users = uSnap ? uSnap.docs.map(d => ({ id: d.id, ...d.data() })) : [];
+                dbData.logs = lSnap ? lSnap.docs.map(d => ({ id: d.id, ...d.data() })) : [];
+            } catch (e) {
+                console.warn("Fetch collections failed", e);
+                showNotification("Não foi possível carregar os dados autorizados.", "error");
+            }
         }
 
         window.addEventListener('DOMContentLoaded', () => {
             const checkFirebase = setInterval(() => {
                 if (window.firebaseServices && window.firebaseServices.auth) {
                     clearInterval(checkFirebase);
-                    const { auth, onAuthStateChanged, signOut, db, doc, getDoc, setDoc } = window.firebaseServices;
+                    const { auth, onAuthStateChanged, signOut, db, doc, getDoc } = window.firebaseServices;
                     
                     onAuthStateChanged(auth, async (user) => {
                         if (user) {
-                            currentUser = user;
-                            if (user.email === MASTER_EMAIL) {
-                                currentUserRole = 'Administrador Master';
-                            } else {
+                            try {
                                 const userRef = doc(db, "users", user.uid);
                                 const userSnap = await getDoc(userRef);
-                                if (userSnap.exists()) {
-                                    if (userSnap.data().status === 'Inativo') {
-                                        await signOut(auth); showNotification("Acesso desativado.", "error"); return;
-                                    }
-                                    currentUserRole = userSnap.data().role;
-                                } else {
-                                    currentUserRole = 'RH';
-                                    await setDoc(userRef, { uid: user.uid, nome: user.email.split('@')[0], email: user.email, role: currentUserRole, status: 'Ativo', createdAt: new Date().toISOString() });
+                                const profile = userSnap.exists() ? userSnap.data() : null;
+                                const allowedRoles = Object.keys(PERMISSIONS);
+                                const isLegacyMaster = profile?.role === 'Administrador Master'
+                                    && profile?.email === user.email
+                                    && user.email === MASTER_EMAIL;
+
+                                if (!profile || (!isLegacyMaster && (profile.status !== 'Ativo' || profile.uid !== user.uid)) || profile.email !== user.email || !allowedRoles.includes(profile.role)) {
+                                    await signOut(auth);
+                                    showNotification("Acesso não autorizado. Solicite a ativação ao administrador.", "error");
+                                    return;
                                 }
+
+                                currentUser = user;
+                                currentUserRole = profile.role;
+                                if (!PERMISSIONS[currentUserRole].includes(currentRoute)) currentRoute = 'dashboard';
+
+                                closeModal('auth-modal');
+                                document.getElementById('user-email-display').innerText = user.email;
+                                document.getElementById('user-initials').innerText = user.email.substring(0, 2).toUpperCase();
+                                document.getElementById('user-role-badge').innerText = `● ${currentUserRole}`;
+
+                                await fetchAllData();
+                                await logAudit('LOGIN', 'Login autorizado no PCM Talent AI');
+                                renderSidebar();
+                                navigate(currentRoute);
+                            } catch (error) {
+                                console.error("Authorization check failed", error);
+                                await signOut(auth);
+                                showNotification("Falha ao validar a autorização de acesso.", "error");
                             }
-                            
-                            closeModal('auth-modal');
-                            document.getElementById('user-email-display').innerText = user.email;
-                            document.getElementById('user-initials').innerText = user.email.substring(0, 2).toUpperCase();
-                            document.getElementById('user-role-badge').innerText = `● ${currentUserRole}`;
-                            
-                            await fetchAllData();
-                            renderSidebar();
-                            navigate(currentRoute);
                         } else {
-                            currentUser = null; openModal('auth-modal');
+                            currentUser = null;
+                            currentUserRole = 'Observador';
+                            dbData = { vagas: [], candidatos: [], logs: [], users: [] };
+                            openModal('auth-modal');
                         }
                     });
                 }
@@ -528,21 +544,15 @@
             const email = document.getElementById('auth-email').value;
             const pwd = document.getElementById('auth-password').value;
             const errDiv = document.getElementById('auth-error');
-            const { auth, signInWithEmailAndPassword, createUserWithEmailAndPassword, db, doc, setDoc } = window.firebaseServices;
+            const { auth, signInWithEmailAndPassword } = window.firebaseServices;
             errDiv.classList.add('hidden');
             
             try {
                 await signInWithEmailAndPassword(auth, email, pwd);
-                await logAudit('LOGIN', `Login executado: ${email}`);
-            } catch (e) {
-                try {
-                    const cred = await createUserWithEmailAndPassword(auth, email, pwd);
-                    const initRole = email === MASTER_EMAIL ? 'Administrador Master' : 'RH';
-                    await setDoc(doc(db, "users", cred.user.uid), { uid: cred.user.uid, nome: email.split('@')[0], email: email, role: initRole, status: 'Ativo', createdAt: new Date().toISOString() });
-                    await logAudit('USER_REGISTERED', `Auto-cadastro: ${email}`);
-                } catch(err) {
-                    errDiv.innerText = "Falha no login: " + err.message; errDiv.classList.remove('hidden');
-                }
+            } catch (error) {
+                console.warn("Login failed", error.code);
+                errDiv.innerText = "E-mail ou senha inválidos, ou acesso ainda não autorizado.";
+                errDiv.classList.remove('hidden');
             }
         }
         async function handleLogout() { await window.firebaseServices.signOut(window.firebaseServices.auth); }
@@ -574,7 +584,7 @@
             } else if (route === 'candidatos' && canManageVagas) {
                 actions.innerHTML = `<button onclick="abrirModalCandidato()" class="px-4 py-2 bg-emerald-600 text-white text-sm font-semibold rounded-lg shadow-sm"><i class="fa-solid fa-user-plus mr-2"></i>Triagem (CV)</button>`;
             } else if (route === 'usuarios' && isMasterOrAdmin) {
-                actions.innerHTML = `<button onclick="abrirModalUser()" class="px-4 py-2 bg-primary text-white text-sm font-semibold rounded-lg shadow-sm"><i class="fa-solid fa-plus mr-2"></i>Novo Usuário</button>`;
+                actions.innerHTML = `<span class="text-xs text-slate-500">Novas contas devem ser criadas primeiro no Firebase Authentication.</span>`;
             }
             renderContent();
         }
@@ -828,24 +838,27 @@
             if (id) {
                 const u = dbData.users.find(x => x.id === id);
                 document.getElementById('nu-id').value = u.id; document.getElementById('nu-email').value = u.email;
+                document.getElementById('nu-email').readOnly = true;
                 document.getElementById('nu-role').value = u.role; document.getElementById('nu-status').value = u.status;
+            } else {
+                showNotification("Crie primeiro a conta no Firebase Authentication e vincule o UID.", "error");
+                return;
             }
             openModal('modal-novo-usuario');
         }
 
         async function salvarNovoUsuario(e) {
             e.preventDefault();
-            const { db, doc, setDoc, updateDoc } = window.firebaseServices;
+            const { db, doc, updateDoc } = window.firebaseServices;
             const id = document.getElementById('nu-id').value;
-            const data = { email: document.getElementById('nu-email').value, role: document.getElementById('nu-role').value, status: document.getElementById('nu-status').value };
+            const email = document.getElementById('nu-email').value;
+            const data = { role: document.getElementById('nu-role').value, status: document.getElementById('nu-status').value };
             try {
-                if (id) { await updateDoc(doc(db, "users", id), data); await logAudit('USER_UPDATE', `Usuário alterado: ${data.email}`); } 
-                else {
-                    const tempId = 'usr_' + Date.now(); data.uid = tempId; data.createdAt = new Date().toISOString(); data.nome = data.email.split('@')[0];
-                    await setDoc(doc(db, "users", tempId), data); await logAudit('USER_CREATE', `Usuário gerado pelo Painel: ${data.email}`);
-                }
+                if (!id) throw new Error("Usuário sem UID do Firebase Authentication");
+                await updateDoc(doc(db, "users", id), data);
+                await logAudit('USER_UPDATE', `Usuário alterado: ${email}`);
                 showNotification("Usuário salvo!"); closeModal('modal-novo-usuario'); await fetchAllData(); renderContent();
-            } catch(err) { showNotification("Erro", "error"); }
+            } catch(err) { showNotification("Não foi possível atualizar o usuário.", "error"); }
         }
         function excluirUsuario(id) {
             openConfirm('Excluir Usuário', 'Isso invalidará o acesso.', async () => {
